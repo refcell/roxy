@@ -42,23 +42,17 @@ pub async fn run_server(app: roxy_server::Router, config: &RoxyConfig) -> Result
 
         info!(address = %metrics_addr, "Metrics server listening");
 
-        let metrics = Arc::new(
-            RoxyMetrics::new().wrap_err("failed to initialize metrics recorder")?,
-        );
+        let metrics =
+            Arc::new(RoxyMetrics::new().wrap_err("failed to initialize metrics recorder")?);
 
-        let metrics_app = Router::new()
-            .route("/metrics", get(metrics_handler))
-            .with_state(metrics);
+        let metrics_app = Router::new().route("/metrics", get(metrics_handler)).with_state(metrics);
 
         let mut shutdown_rx = shutdown_tx.subscribe();
         Some(tokio::spawn(async move {
             let shutdown = async move {
                 shutdown_rx.recv().await.ok();
             };
-            axum::serve(metrics_listener, metrics_app)
-                .with_graceful_shutdown(shutdown)
-                .await
-                .ok();
+            axum::serve(metrics_listener, metrics_app).with_graceful_shutdown(shutdown).await.ok();
         }))
     } else {
         None
@@ -73,10 +67,7 @@ pub async fn run_server(app: roxy_server::Router, config: &RoxyConfig) -> Result
         }
     };
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .wrap_err("server error")?;
+    axum::serve(listener, app).with_graceful_shutdown(shutdown).await.wrap_err("server error")?;
 
     if let Some(handle) = metrics_handle {
         handle.await.ok();
