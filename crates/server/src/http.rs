@@ -230,9 +230,7 @@ pub async fn handle_rpc<C: Cache>(
 
     // Build response with headers
     let mut response = (StatusCode::OK, response_bytes).into_response();
-    response
-        .headers_mut()
-        .insert("Content-Type", HeaderValue::from_static("application/json"));
+    response.headers_mut().insert("Content-Type", HeaderValue::from_static("application/json"));
 
     response
 }
