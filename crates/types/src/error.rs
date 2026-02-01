@@ -52,18 +52,18 @@ pub enum RoxyError {
 }
 
 impl RoxyError {
-    /// Convert to an alloy ErrorPayload for JSON-RPC responses.
+    /// Convert to an alloy [`ErrorPayload`] for JSON-RPC responses.
     #[must_use]
     pub fn to_error_payload(&self) -> ErrorPayload {
         match self {
             Self::RateLimited { retry_after } => ErrorPayload {
                 code: error_codes::RATE_LIMITED,
-                message: format!("rate limited, retry after {:?}", retry_after).into(),
+                message: format!("rate limited, retry after {retry_after:?}").into(),
                 data: None,
             },
             Self::BackendOffline { backend } => ErrorPayload {
                 code: error_codes::BACKEND_OFFLINE,
-                message: format!("backend {} is offline", backend).into(),
+                message: format!("backend {backend} is offline").into(),
                 data: None,
             },
             Self::NoHealthyBackends => ErrorPayload {
