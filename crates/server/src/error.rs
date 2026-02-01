@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use axum::{
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use bytes::Bytes;
@@ -142,13 +142,13 @@ impl IntoResponse for ServerError {
 
         // Add retry-after header for rate limited responses
         if let Self::RateLimited { retry_after } = &self {
-            response
-                .headers_mut()
-                .insert("Retry-After", retry_after.as_secs().to_string().parse().unwrap());
+            if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().to_string()) {
+                response.headers_mut().insert("Retry-After", value);
+            }
         }
 
         // Always set content-type to JSON
-        response.headers_mut().insert("Content-Type", "application/json".parse().unwrap());
+        response.headers_mut().insert("Content-Type", HeaderValue::from_static("application/json"));
 
         response
     }
