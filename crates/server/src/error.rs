@@ -141,10 +141,10 @@ impl IntoResponse for ServerError {
         let mut response = (status, body).into_response();
 
         // Add retry-after header for rate limited responses
-        if let Self::RateLimited { retry_after } = &self {
-            if let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().to_string()) {
-                response.headers_mut().insert("Retry-After", value);
-            }
+        if let Self::RateLimited { retry_after } = &self
+            && let Ok(value) = HeaderValue::from_str(&retry_after.as_secs().to_string())
+        {
+            response.headers_mut().insert("Retry-After", value);
         }
 
         // Always set content-type to JSON
