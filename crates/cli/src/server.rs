@@ -10,11 +10,36 @@ use roxy_config::RoxyConfig;
 use roxy_server::{RoxyMetrics, metrics_handler};
 use tokio::sync::broadcast;
 
+/// Wait for a shutdown signal (SIGINT or SIGTERM on Unix, Ctrl+C on Windows).
+#[cfg(unix)]
+async fn shutdown_signal() {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+
+    tokio::select! {
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, initiating graceful shutdown...");
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT, initiating graceful shutdown...");
+        }
+    }
+}
+
+/// Wait for a shutdown signal (Ctrl+C on non-Unix platforms).
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c().await.ok();
+    info!("Received Ctrl+C, initiating graceful shutdown...");
+}
+
 /// Run the HTTP server with optional metrics endpoint.
 ///
 /// This function starts the HTTP server and optionally a separate metrics server
 /// if metrics are enabled in the configuration. Both servers will be shut down
-/// gracefully when a Ctrl+C signal is received.
+/// gracefully when a shutdown signal is received (SIGINT/SIGTERM on Unix, Ctrl+C on Windows).
 ///
 /// # Arguments
 ///
@@ -61,8 +86,7 @@ pub async fn run_server(app: roxy_server::Router, config: &RoxyConfig) -> Result
     let shutdown = {
         let shutdown_tx = shutdown_tx.clone();
         async move {
-            tokio::signal::ctrl_c().await.ok();
-            info!("Received shutdown signal, shutting down gracefully...");
+            shutdown_signal().await;
             shutdown_tx.send(()).ok();
         }
     };
