@@ -2,13 +2,19 @@
 //!
 //! This module provides the HTTP server startup and lifecycle management.
 
+use std::sync::Arc;
+
+use axum::{Router, routing::get};
 use eyre::{Context, Result};
 use roxy_config::RoxyConfig;
+use roxy_server::{RoxyMetrics, metrics_handler};
+use tokio::sync::broadcast;
 
-/// Run the HTTP server.
+/// Run the HTTP server with optional metrics endpoint.
 ///
-/// This function starts the HTTP server and blocks until shutdown is requested
-/// (via Ctrl+C signal).
+/// This function starts the HTTP server and optionally a separate metrics server
+/// if metrics are enabled in the configuration. Both servers will be shut down
+/// gracefully when a Ctrl+C signal is received.
 ///
 /// # Arguments
 ///
@@ -26,13 +32,55 @@ pub async fn run_server(app: roxy_server::Router, config: &RoxyConfig) -> Result
 
     info!(address = %addr, "Roxy RPC proxy listening");
 
-    // Graceful shutdown on Ctrl+C
-    let shutdown = async {
-        tokio::signal::ctrl_c().await.ok();
-        info!("Received shutdown signal, shutting down gracefully...");
+    let (shutdown_tx, _) = broadcast::channel::<()>(1);
+
+    let metrics_handle = if config.metrics.enabled {
+        let metrics_addr = format!("{}:{}", config.metrics.host, config.metrics.port);
+        let metrics_listener = tokio::net::TcpListener::bind(&metrics_addr)
+            .await
+            .wrap_err_with(|| format!("failed to bind metrics server to {}", metrics_addr))?;
+
+        info!(address = %metrics_addr, "Metrics server listening");
+
+        let metrics = Arc::new(
+            RoxyMetrics::new().wrap_err("failed to initialize metrics recorder")?,
+        );
+
+        let metrics_app = Router::new()
+            .route("/metrics", get(metrics_handler))
+            .with_state(metrics);
+
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        Some(tokio::spawn(async move {
+            let shutdown = async move {
+                shutdown_rx.recv().await.ok();
+            };
+            axum::serve(metrics_listener, metrics_app)
+                .with_graceful_shutdown(shutdown)
+                .await
+                .ok();
+        }))
+    } else {
+        None
     };
 
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await.wrap_err("server error")?;
+    let shutdown = {
+        let shutdown_tx = shutdown_tx.clone();
+        async move {
+            tokio::signal::ctrl_c().await.ok();
+            info!("Received shutdown signal, shutting down gracefully...");
+            shutdown_tx.send(()).ok();
+        }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .wrap_err("server error")?;
+
+    if let Some(handle) = metrics_handle {
+        handle.await.ok();
+    }
 
     info!("Server shut down successfully");
     Ok(())
