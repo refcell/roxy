@@ -198,7 +198,7 @@ impl Default for RateLimitConfig {
 /// Maps RPC methods to backend groups or blocks them entirely.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RouteConfig {
-    /// Method name or prefix (e.g., "eth_call" or "eth_").
+    /// Method name or prefix (e.g., `eth_call` or `eth_`).
     pub method: String,
     /// Target group name or "block" to reject the method.
     pub target: String,
