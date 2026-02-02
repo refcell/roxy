@@ -227,7 +227,7 @@ impl<C: CodecConfig> RpcCodec<C> {
         &self.config
     }
 
-    /// Parse raw bytes into a ParsedRequestPacket, enforcing size limits.
+    /// Parse raw bytes into a `ParsedRequestPacket`, enforcing size limits.
     ///
     /// This parses the JSON and validates structure. Use this when you need
     /// to inspect the request method or parameters.
@@ -262,7 +262,7 @@ impl<C: CodecConfig> RpcCodec<C> {
         self.decode(bytes.as_ref())
     }
 
-    /// Serialize a ParsedResponsePacket to bytes.
+    /// Serialize a `ParsedResponsePacket` to bytes.
     ///
     /// # Errors
     ///
@@ -276,7 +276,7 @@ impl<C: CodecConfig> RpcCodec<C> {
         Ok(Bytes::from(json))
     }
 
-    /// Serialize a single ParsedResponse to bytes.
+    /// Serialize a single `ParsedResponse` to bytes.
     ///
     /// # Errors
     ///
@@ -298,7 +298,7 @@ impl<C: CodecConfig> RpcCodec<C> {
         Ok(Bytes::from(json))
     }
 
-    /// Parse raw bytes into a ParsedRequestPacket.
+    /// Parse raw bytes into a `ParsedRequestPacket`.
     fn parse_request_packet(&self, bytes: &[u8]) -> Result<ParsedRequestPacket, CodecError> {
         // Trim leading whitespace to check if it starts with [ (batch) or { (single)
         let trimmed = bytes.iter().skip_while(|b| b.is_ascii_whitespace()).copied().next();

@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Core trait definitions for Roxy components including Backend, Cache,
-RateLimiter, LoadBalancer, and runtime abstractions for spawning,
+`RateLimiter`, `LoadBalancer`, and runtime abstractions for spawning,
 clocks, and metrics.
 
 ## License
