@@ -19,6 +19,7 @@ roxy-server.workspace = true
 roxy-backend.workspace = true
 roxy-rpc.workspace = true
 roxy-traits.workspace = true
+roxy-types.workspace = true
 roxy-cache.workspace = true
 
 # cli
@@ -27,6 +28,7 @@ clap = { version = "4.5", features = ["derive"] }
 # async
 tokio.workspace = true
 axum.workspace = true
+tower.workspace = true
 
 # logging
 tracing.workspace = true

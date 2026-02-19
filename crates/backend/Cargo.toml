@@ -23,10 +23,17 @@ alloy-primitives.workspace = true
 
 # async
 tokio.workspace = true
-async-trait = "0.1"
+
+# tower
+tower.workspace = true
+pin-project-lite = "0.2"
+futures = "0.3"
 
 # networking
 reqwest.workspace = true
+
+# serialization
+serde_json.workspace = true
 
 # misc
 tracing.workspace = true

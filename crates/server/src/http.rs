@@ -210,11 +210,9 @@ pub async fn handle_rpc<C: Cache>(
             ParsedResponsePacket::Single(response)
         }
         ParsedRequestPacket::Batch(requests) => {
-            let mut responses = Vec::with_capacity(requests.len());
-            for request in requests {
-                let response = process_single_request(&state, request).await;
-                responses.push(response);
-            }
+            let futs =
+                requests.into_iter().map(|request| process_single_request(&state, request));
+            let responses = futures_util::future::join_all(futs).await;
             ParsedResponsePacket::Batch(responses)
         }
     };

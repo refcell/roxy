@@ -3,9 +3,10 @@
 //! This module provides a fluent builder interface for configuring and building
 //! the HTTP server router from configuration.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use eyre::{Context, Result};
+use roxy_backend::{ConsensusPoller, ConsensusState};
 use roxy_cache::MemoryCache;
 use roxy_config::RoxyConfig;
 use roxy_rpc::RpcCodec;
@@ -76,14 +77,15 @@ impl AppBuilder {
     ///
     /// This method orchestrates the creation of all components:
     /// 1. Creates backends from config
-    /// 2. Creates backend groups with load balancers
-    /// 3. Creates RPC codec with configured limits
-    /// 4. Creates method router
-    /// 5. Creates validators
-    /// 6. Creates rate limiter if enabled
-    /// 7. Builds server state
-    /// 8. Creates cache if enabled
-    /// 9. Creates and returns the axum Router
+    /// 2. Spawns consensus poller as background task
+    /// 3. Creates backend groups with load balancers
+    /// 4. Creates RPC codec with configured limits
+    /// 5. Creates method router
+    /// 6. Creates validators
+    /// 7. Creates rate limiter if enabled
+    /// 8. Builds server state
+    /// 9. Creates cache if enabled
+    /// 10. Creates and returns the axum Router
     ///
     /// # Errors
     ///
@@ -93,24 +95,41 @@ impl AppBuilder {
         let backends = self.backend_factory.create(config)?;
         debug!(count = backends.len(), "Created backends");
 
-        // 2. Create backend groups with load balancers
+        // 2. Spawn consensus poller as background task
+        // Clone all backends for the poller before groups consume them.
+        let poller_backends: Vec<_> = backends.values().cloned().collect();
+        if !poller_backends.is_empty() {
+            let consensus_state = Arc::new(ConsensusState::new());
+            // f = floor((n-1)/3) for BFT safety
+            let byzantine_f = poller_backends.len().saturating_sub(1) / 3;
+            let poller = Arc::new(ConsensusPoller::new(
+                poller_backends,
+                byzantine_f,
+                consensus_state,
+                Duration::from_secs(12),
+            ));
+            tokio::spawn(async move { poller.run().await });
+            debug!(byzantine_f, "Spawned consensus poller");
+        }
+
+        // 3. Create backend groups with load balancers
         let groups = self.group_factory.create(config, &backends)?;
         debug!(count = groups.len(), "Created backend groups");
 
-        // 3. Create RPC codec with configured limits
+        // 4. Create RPC codec with configured limits
         let codec =
             RpcCodec::new(DefaultCodecConfig::new().with_max_size(config.server.max_request_size));
 
-        // 4. Create method router
+        // 5. Create method router
         let router = self.router_factory.create(config);
 
-        // 5. Create validators
+        // 6. Create validators
         let validators = self.validator_factory.create(config);
 
-        // 6. Create rate limiter if enabled
+        // 7. Create rate limiter if enabled
         let rate_limiter = self.rate_limiter_factory.create(config);
 
-        // 7. Build server state
+        // 8. Build server state
         let mut builder = ServerBuilder::new().codec(codec).router(router).validators(validators);
 
         if let Some(rl) = rate_limiter {
@@ -123,18 +142,18 @@ impl AppBuilder {
             builder = builder.add_group(name, Arc::new(group));
         }
 
-        // 8. Create cache if enabled
+        // 9. Create cache if enabled
         if config.cache.enabled {
             let cache = Arc::new(MemoryCache::new(config.cache.memory_size));
             debug!(size = config.cache.memory_size, "Created memory cache");
             let state = builder.cache(cache).build().wrap_err("failed to build server state")?;
-            // 9. Create router
+            // 10. Create router
             return Ok(create_router(state));
         }
 
         let state = builder.build().wrap_err("failed to build server state")?;
 
-        // 9. Create router
+        // 10. Create router
         Ok(create_router(state))
     }
 }

@@ -8,12 +8,12 @@ use std::{
         Mutex,
         atomic::{AtomicUsize, Ordering},
     },
+    task::{Context, Poll},
     time::Duration,
 };
 
 use alloy_json_rpc::{RequestPacket, ResponsePacket};
-use async_trait::async_trait;
-use roxy_traits::{Backend, HealthStatus};
+use roxy_traits::{BackendMeta, HealthStatus};
 use roxy_types::RoxyError;
 
 // ============================================================================
@@ -44,6 +44,7 @@ pub enum MockResponse {
 /// A mock backend for testing.
 ///
 /// Provides configurable responses, latency simulation, and call counting.
+/// Implements `BackendMeta` and `tower::Service<RequestPacket>`.
 ///
 /// # Example
 ///
@@ -67,6 +68,20 @@ pub struct MockBackend {
     latency: Duration,
     health: HealthStatus,
     latency_ema_value: Duration,
+}
+
+impl Clone for MockBackend {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            url: self.url.clone(),
+            responses: Mutex::new(self.responses.lock().unwrap().clone()),
+            call_count: AtomicUsize::new(self.call_count.load(Ordering::SeqCst)),
+            latency: self.latency,
+            health: self.health,
+            latency_ema_value: self.latency_ema_value,
+        }
+    }
 }
 
 impl std::fmt::Debug for MockBackend {
@@ -159,6 +174,18 @@ impl MockBackend {
         self.call_count.store(0, Ordering::SeqCst);
     }
 
+    /// Get the health status.
+    #[must_use]
+    pub const fn health_status(&self) -> HealthStatus {
+        self.health
+    }
+
+    /// Get the latency EMA value.
+    #[must_use]
+    pub const fn latency_ema(&self) -> Duration {
+        self.latency_ema_value
+    }
+
     /// Get the next response from the queue.
     fn next_response(&self) -> Option<MockResponse> {
         let mut responses = self.responses.lock().unwrap();
@@ -166,8 +193,7 @@ impl MockBackend {
     }
 }
 
-#[async_trait]
-impl Backend for MockBackend {
+impl BackendMeta for MockBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -175,14 +201,22 @@ impl Backend for MockBackend {
     fn rpc_url(&self) -> &str {
         &self.url
     }
+}
 
-    async fn forward(&self, request: RequestPacket) -> Result<ResponsePacket, RoxyError> {
+impl tower::Service<RequestPacket> for MockBackend {
+    type Response = ResponsePacket;
+    type Error = RoxyError;
+    type Future = std::pin::Pin<Box<dyn std::future::Future<Output = Result<ResponsePacket, RoxyError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: RequestPacket) -> Self::Future {
         self.call_count.fetch_add(1, Ordering::SeqCst);
 
-        // Simulate latency
-        if !self.latency.is_zero() {
-            tokio::time::sleep(self.latency).await;
-        }
+        let latency = self.latency;
+        let name = self.name.clone();
 
         // Get response or use default
         let response = self.next_response().unwrap_or_else(|| {
@@ -199,28 +233,27 @@ impl Backend for MockBackend {
             ))
         });
 
-        match response {
-            MockResponse::Success(json) => {
-                let packet: ResponsePacket = serde_json::from_str(&json).map_err(|e| {
-                    RoxyError::Internal(format!("Failed to parse mock response: {e}"))
-                })?;
-                Ok(packet)
+        Box::pin(async move {
+            // Simulate latency
+            if !latency.is_zero() {
+                tokio::time::sleep(latency).await;
             }
-            MockResponse::Error(msg) => Err(RoxyError::BackendOffline { backend: msg }),
-            MockResponse::Timeout => {
-                // Simulate a very long delay that would trigger a timeout
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                Err(RoxyError::BackendTimeout { backend: self.name.clone() })
+
+            match response {
+                MockResponse::Success(json) => {
+                    let packet: ResponsePacket = serde_json::from_str(&json).map_err(|e| {
+                        RoxyError::Internal(format!("Failed to parse mock response: {e}"))
+                    })?;
+                    Ok(packet)
+                }
+                MockResponse::Error(msg) => Err(RoxyError::BackendOffline { backend: msg }),
+                MockResponse::Timeout => {
+                    // Simulate a very long delay that would trigger a timeout
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Err(RoxyError::BackendTimeout { backend: name })
+                }
             }
-        }
-    }
-
-    fn health_status(&self) -> HealthStatus {
-        self.health
-    }
-
-    fn latency_ema(&self) -> Duration {
-        self.latency_ema_value
+        })
     }
 }
 
@@ -896,23 +929,27 @@ mod tests {
 
         #[tokio::test]
         async fn test_forward_counts_calls() {
+            use tower::Service;
+
             let response = fixtures::success_response(1, "0x1");
-            let backend =
+            let mut backend =
                 MockBackend::new("test").with_response(MockResponse::Success(response.clone()));
 
             let request = create_test_request_packet("eth_blockNumber");
-            let _ = backend.forward(request).await;
+            let _ = backend.call(request).await;
 
             assert_eq!(backend.call_count(), 1);
         }
 
         #[tokio::test]
         async fn test_forward_error_response() {
-            let backend =
+            use tower::Service;
+
+            let mut backend =
                 MockBackend::new("test").with_response(MockResponse::Error("test error".into()));
 
             let request = create_test_request_packet("eth_blockNumber");
-            let result = backend.forward(request).await;
+            let result = backend.call(request).await;
 
             assert!(result.is_err());
         }

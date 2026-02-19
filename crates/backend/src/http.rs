@@ -1,43 +1,37 @@
 //! HTTP backend implementation.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::task::{Context, Poll};
 
 use alloy_json_rpc::{RequestPacket, ResponsePacket};
-use async_trait::async_trait;
-use roxy_traits::{Backend, HealthStatus, HealthTracker};
+use futures::future::BoxFuture;
+use roxy_traits::BackendMeta;
 use roxy_types::RoxyError;
-use tokio::sync::RwLock;
-
-use crate::health::EmaHealthTracker;
+use std::sync::Arc;
+use tower::Service;
 
 /// Configuration for HTTP backend.
 #[derive(Debug, Clone)]
 pub struct BackendConfig {
-    /// Request timeout.
-    pub timeout: Duration,
-    /// Maximum retry attempts.
-    pub max_retries: u32,
     /// Maximum batch size.
     pub max_batch_size: usize,
 }
 
 impl Default for BackendConfig {
     fn default() -> Self {
-        Self { timeout: Duration::from_secs(30), max_retries: 3, max_batch_size: 100 }
+        Self { max_batch_size: 100 }
     }
 }
 
 /// HTTP backend for RPC forwarding.
-#[derive(Debug)]
+///
+/// This is a bare HTTP backend that performs the HTTP POST + JSON deserialize.
+/// Retry, timeout, and health recording are handled by tower layers.
+#[derive(Debug, Clone)]
 pub struct HttpBackend {
-    name: String,
-    rpc_url: String,
+    name: Arc<str>,
+    rpc_url: Arc<str>,
     client: reqwest::Client,
-    health: Arc<RwLock<EmaHealthTracker>>,
-    config: BackendConfig,
+    _config: BackendConfig,
 }
 
 impl HttpBackend {
@@ -48,48 +42,19 @@ impl HttpBackend {
     /// Returns an error if the HTTP client fails to build.
     pub fn new(name: String, rpc_url: String, config: BackendConfig) -> Result<Self, RoxyError> {
         let client = reqwest::Client::builder()
-            .timeout(config.timeout)
             .build()
             .map_err(|e| RoxyError::Internal(format!("failed to build HTTP client: {e}")))?;
 
         Ok(Self {
-            name,
-            rpc_url,
+            name: Arc::from(name.as_str()),
+            rpc_url: Arc::from(rpc_url.as_str()),
             client,
-            health: Arc::new(RwLock::new(EmaHealthTracker::new(Default::default()))),
-            config,
+            _config: config,
         })
-    }
-
-    async fn do_forward(&self, request: &RequestPacket) -> Result<ResponsePacket, RoxyError> {
-        let start = Instant::now();
-
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(request)
-            .send()
-            .await
-            .map_err(|_| RoxyError::BackendOffline { backend: self.name.clone() })?;
-
-        let duration = start.elapsed();
-        let success = response.status().is_success();
-
-        self.health.write().await.record(duration, success);
-
-        if !success {
-            return Err(RoxyError::BackendOffline { backend: self.name.clone() });
-        }
-
-        response
-            .json()
-            .await
-            .map_err(|e| RoxyError::Internal(format!("failed to parse response: {e}")))
     }
 }
 
-#[async_trait]
-impl Backend for HttpBackend {
+impl BackendMeta for HttpBackend {
     fn name(&self) -> &str {
         &self.name
     }
@@ -97,32 +62,38 @@ impl Backend for HttpBackend {
     fn rpc_url(&self) -> &str {
         &self.rpc_url
     }
+}
 
-    async fn forward(&self, request: RequestPacket) -> Result<ResponsePacket, RoxyError> {
-        let mut last_error = None;
+impl Service<RequestPacket> for HttpBackend {
+    type Response = ResponsePacket;
+    type Error = RoxyError;
+    type Future = BoxFuture<'static, Result<ResponsePacket, RoxyError>>;
 
-        for attempt in 0..=self.config.max_retries {
-            match self.do_forward(&request).await {
-                Ok(response) => return Ok(response),
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt < self.config.max_retries {
-                        let backoff = Duration::from_millis((2u64.pow(attempt) * 100).min(3000));
-                        tokio::time::sleep(backoff).await;
-                    }
-                }
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: RequestPacket) -> Self::Future {
+        let client = self.client.clone();
+        let rpc_url = self.rpc_url.clone();
+        let name = self.name.clone();
+
+        Box::pin(async move {
+            let response = client
+                .post(rpc_url.as_ref())
+                .json(&request)
+                .send()
+                .await
+                .map_err(|_| RoxyError::BackendOffline { backend: name.to_string() })?;
+
+            if !response.status().is_success() {
+                return Err(RoxyError::BackendOffline { backend: name.to_string() });
             }
-        }
 
-        // SAFETY: Loop always sets last_error before exiting without return
-        Err(last_error.expect("loop guarantees error was set"))
-    }
-
-    fn health_status(&self) -> HealthStatus {
-        self.health.try_read().map(|h| h.status()).unwrap_or(HealthStatus::Healthy)
-    }
-
-    fn latency_ema(&self) -> Duration {
-        self.health.try_read().map(|h| h.latency_ema()).unwrap_or(Duration::ZERO)
+            response
+                .json()
+                .await
+                .map_err(|e| RoxyError::Internal(format!("failed to parse response: {e}")))
+        })
     }
 }

@@ -75,7 +75,7 @@ tokio-stream = "0.1"
 hyper = "1.0"
 axum = { version = "0.7", features = ["ws"] }
 reqwest = { version = "0.12", features = ["json"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["retry", "timeout", "limit", "util", "steer"] }
 
 # serialization
 serde = { version = "1.0", features = ["derive"] }
