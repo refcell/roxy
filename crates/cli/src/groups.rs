@@ -6,9 +6,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use eyre::{Result, eyre};
-use roxy_backend::{BackendGroup, EmaLoadBalancer, RoundRobinBalancer};
+use roxy_backend::{BackendGroup, BoxedBackend, EmaLoadBalancer, RoundRobinBalancer};
 use roxy_config::{LoadBalancerType, RoxyConfig};
-use roxy_traits::{Backend, LoadBalancer};
+use roxy_traits::LoadBalancer;
 
 /// Factory for creating backend groups from configuration.
 ///
@@ -35,7 +35,7 @@ impl GroupFactory {
     /// # Arguments
     ///
     /// * `config` - The Roxy configuration
-    /// * `backends` - Map of backend names to Backend trait objects
+    /// * `backends` - Map of backend names to boxed backends
     ///
     /// # Returns
     ///
@@ -47,7 +47,7 @@ impl GroupFactory {
     pub fn create(
         &self,
         config: &RoxyConfig,
-        backends: &HashMap<String, Arc<dyn Backend>>,
+        backends: &HashMap<String, BoxedBackend>,
     ) -> Result<HashMap<String, BackendGroup>> {
         let mut groups = HashMap::new();
 
@@ -121,7 +121,7 @@ impl GroupFactory {
 /// # Arguments
 ///
 /// * `config` - The Roxy configuration
-/// * `backends` - Map of backend names to Backend trait objects
+/// * `backends` - Map of backend names to boxed backends
 ///
 /// # Returns
 ///
@@ -132,7 +132,7 @@ impl GroupFactory {
 /// Returns an error if a referenced backend doesn't exist.
 pub fn create_groups(
     config: &RoxyConfig,
-    backends: &HashMap<String, Arc<dyn Backend>>,
+    backends: &HashMap<String, BoxedBackend>,
 ) -> Result<HashMap<String, BackendGroup>> {
     GroupFactory::new().create(config, backends)
 }

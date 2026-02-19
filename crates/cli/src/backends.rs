@@ -5,9 +5,14 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use eyre::Result;
-use roxy_backend::{BackendConfig as HttpBackendConfig, HttpBackend};
+use roxy_backend::{
+    BackendConfig as HttpBackendConfig, BoxedBackend, EmaHealthTracker, HealthConfig,
+    HealthRecordingLayer, HttpBackend, RoxyRetryPolicy,
+};
 use roxy_config::RoxyConfig;
-use roxy_traits::Backend;
+use roxy_types::RoxyError;
+use tokio::sync::RwLock;
+use tower::ServiceBuilder;
 
 /// Factory for creating HTTP backends from configuration.
 ///
@@ -46,26 +51,57 @@ impl BackendFactory {
 
     /// Create backends from configuration.
     ///
+    /// Each backend is composed with tower layers:
+    /// - Health recording (outermost) - records latency and success/failure
+    /// - Timeout - enforces per-request timeout
+    /// - Retry - retries on transient errors with exponential backoff
+    /// - Raw HTTP backend (innermost) - performs the actual HTTP POST
+    ///
     /// # Errors
     ///
     /// Returns an error if backend creation fails.
-    pub fn create(&self, config: &RoxyConfig) -> Result<HashMap<String, Arc<dyn Backend>>> {
+    pub fn create(&self, config: &RoxyConfig) -> Result<HashMap<String, BoxedBackend>> {
         let mut backends = HashMap::new();
 
         for backend_config in &config.backends {
             let http_config = HttpBackendConfig {
-                timeout: Duration::from_millis(backend_config.timeout_ms),
-                max_retries: backend_config.max_retries,
                 max_batch_size: self.default_batch_size,
             };
 
-            let backend = HttpBackend::new(
+            let raw_backend = HttpBackend::new(
                 backend_config.name.clone(),
                 backend_config.url.clone(),
                 http_config,
             )?;
 
-            backends.insert(backend_config.name.clone(), Arc::new(backend) as Arc<dyn Backend>);
+            let timeout = Duration::from_millis(backend_config.timeout_ms);
+            let retry_policy = RoxyRetryPolicy::new(backend_config.max_retries);
+            let health = Arc::new(RwLock::new(EmaHealthTracker::new(HealthConfig::default())));
+
+            let backend_name_for_err = backend_config.name.clone();
+
+            // Compose layers: health recording -> map_err -> timeout -> retry -> raw backend
+            // The timeout layer returns Box<dyn Error>, so we map it back to RoxyError.
+            let layered = ServiceBuilder::new()
+                .layer(HealthRecordingLayer::new(health))
+                .map_err(move |err: Box<dyn std::error::Error + Send + Sync>| {
+                    if err.is::<tower::timeout::error::Elapsed>() {
+                        RoxyError::BackendTimeout { backend: backend_name_for_err.clone() }
+                    } else {
+                        RoxyError::Internal(err.to_string())
+                    }
+                })
+                .layer(tower::timeout::TimeoutLayer::new(timeout))
+                .layer(tower::retry::RetryLayer::new(retry_policy))
+                .service(raw_backend);
+
+            let boxed = BoxedBackend::from_service(
+                &backend_config.name,
+                &backend_config.url,
+                layered,
+            );
+
+            backends.insert(backend_config.name.clone(), boxed);
             trace!(name = %backend_config.name, url = %backend_config.url, "Created backend");
         }
 
@@ -84,12 +120,12 @@ impl BackendFactory {
 ///
 /// # Returns
 ///
-/// A map of backend names to Backend trait objects.
+/// A map of backend names to boxed backends.
 ///
 /// # Errors
 ///
 /// Returns an error if backend creation fails.
-pub fn create_backends(config: &RoxyConfig) -> Result<HashMap<String, Arc<dyn Backend>>> {
+pub fn create_backends(config: &RoxyConfig) -> Result<HashMap<String, BoxedBackend>> {
     BackendFactory::new().create(config)
 }
 

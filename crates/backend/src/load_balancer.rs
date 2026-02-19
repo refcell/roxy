@@ -5,25 +5,22 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use roxy_traits::{Backend, LoadBalancer};
+use roxy_traits::{BackendMeta, LoadBalancer};
 
 /// EMA-based load balancer - lower latency = higher priority.
+///
+/// Note: With the tower refactoring, health and latency data will be
+/// provided by layers. For now, this simply returns all backends in order.
 #[derive(Debug, Default)]
 pub struct EmaLoadBalancer;
 
 impl LoadBalancer for EmaLoadBalancer {
-    fn select(&self, backends: &[Arc<dyn Backend>]) -> Option<Arc<dyn Backend>> {
+    fn select(&self, backends: &[Arc<dyn BackendMeta>]) -> Option<Arc<dyn BackendMeta>> {
         self.select_ordered(backends).into_iter().next()
     }
 
-    fn select_ordered(&self, backends: &[Arc<dyn Backend>]) -> Vec<Arc<dyn Backend>> {
-        let mut healthy: Vec<_> = backends.iter().filter(|b| b.is_healthy()).cloned().collect();
-        let mut unhealthy: Vec<_> = backends.iter().filter(|b| !b.is_healthy()).cloned().collect();
-
-        healthy.sort_by_key(|b| b.latency_ema());
-        unhealthy.sort_by_key(|b| b.latency_ema());
-
-        healthy.into_iter().chain(unhealthy).collect()
+    fn select_ordered(&self, backends: &[Arc<dyn BackendMeta>]) -> Vec<Arc<dyn BackendMeta>> {
+        backends.to_vec()
     }
 }
 
@@ -48,28 +45,25 @@ impl Default for RoundRobinBalancer {
 }
 
 impl LoadBalancer for RoundRobinBalancer {
-    fn select(&self, backends: &[Arc<dyn Backend>]) -> Option<Arc<dyn Backend>> {
-        let healthy: Vec<_> = backends.iter().filter(|b| b.is_healthy()).collect();
-        if healthy.is_empty() {
+    fn select(&self, backends: &[Arc<dyn BackendMeta>]) -> Option<Arc<dyn BackendMeta>> {
+        if backends.is_empty() {
             return None;
         }
 
         let idx = self.index.fetch_add(1, Ordering::Relaxed);
-        Some(healthy[idx % healthy.len()].clone())
+        Some(backends[idx % backends.len()].clone())
     }
 
-    fn select_ordered(&self, backends: &[Arc<dyn Backend>]) -> Vec<Arc<dyn Backend>> {
-        let healthy: Vec<_> = backends.iter().filter(|b| b.is_healthy()).cloned().collect();
-        if healthy.is_empty() {
+    fn select_ordered(&self, backends: &[Arc<dyn BackendMeta>]) -> Vec<Arc<dyn BackendMeta>> {
+        if backends.is_empty() {
             return Vec::new();
         }
 
-        // Increment the index for next call to ensure rotation
         let idx = self.index.fetch_add(1, Ordering::Relaxed);
 
-        let mut result = Vec::with_capacity(healthy.len());
-        for i in 0..healthy.len() {
-            result.push(healthy[(idx + i) % healthy.len()].clone());
+        let mut result = Vec::with_capacity(backends.len());
+        for i in 0..backends.len() {
+            result.push(backends[(idx + i) % backends.len()].clone());
         }
         result
     }
@@ -77,43 +71,26 @@ impl LoadBalancer for RoundRobinBalancer {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use alloy_json_rpc::{RequestPacket, ResponsePacket};
-    use async_trait::async_trait;
-    use roxy_traits::HealthStatus;
-    use roxy_types::RoxyError;
-
     use super::*;
 
-    /// Mock backend for testing.
-    struct MockBackend {
+    /// Mock backend metadata for testing.
+    struct MockMeta {
         name: String,
-        healthy: bool,
-        latency: Duration,
     }
 
-    impl MockBackend {
-        fn create(name: &str, healthy: bool, latency_ms: u64) -> Arc<dyn Backend> {
-            Arc::new(Self {
-                name: name.to_string(),
-                healthy,
-                latency: Duration::from_millis(latency_ms),
-            })
+    impl MockMeta {
+        fn create(name: &str) -> Arc<dyn BackendMeta> {
+            Arc::new(Self { name: name.to_string() })
         }
     }
 
-    impl std::fmt::Debug for MockBackend {
+    impl std::fmt::Debug for MockMeta {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("MockBackend")
-                .field("name", &self.name)
-                .field("healthy", &self.healthy)
-                .finish()
+            f.debug_struct("MockMeta").field("name", &self.name).finish()
         }
     }
 
-    #[async_trait]
-    impl Backend for MockBackend {
+    impl BackendMeta for MockMeta {
         fn name(&self) -> &str {
             &self.name
         }
@@ -121,28 +98,12 @@ mod tests {
         fn rpc_url(&self) -> &str {
             "http://mock"
         }
-
-        async fn forward(&self, _request: RequestPacket) -> Result<ResponsePacket, RoxyError> {
-            unimplemented!("mock backend")
-        }
-
-        fn health_status(&self) -> HealthStatus {
-            if self.healthy {
-                HealthStatus::Healthy
-            } else {
-                HealthStatus::Unhealthy { error_rate: 1.0 }
-            }
-        }
-
-        fn latency_ema(&self) -> Duration {
-            self.latency
-        }
     }
 
     #[test]
     fn test_ema_load_balancer_empty() {
         let lb = EmaLoadBalancer;
-        let backends: Vec<Arc<dyn Backend>> = vec![];
+        let backends: Vec<Arc<dyn BackendMeta>> = vec![];
 
         assert!(lb.select(&backends).is_none());
         assert!(lb.select_ordered(&backends).is_empty());
@@ -151,7 +112,7 @@ mod tests {
     #[test]
     fn test_ema_load_balancer_single() {
         let lb = EmaLoadBalancer;
-        let backends = vec![MockBackend::create("b1", true, 100)];
+        let backends = vec![MockMeta::create("b1")];
 
         let selected = lb.select(&backends);
         assert!(selected.is_some());
@@ -159,40 +120,22 @@ mod tests {
     }
 
     #[test]
-    fn test_ema_load_balancer_prefers_lower_latency() {
+    fn test_ema_load_balancer_returns_all() {
         let lb = EmaLoadBalancer;
         let backends = vec![
-            MockBackend::create("slow", true, 500),
-            MockBackend::create("fast", true, 50),
-            MockBackend::create("medium", true, 200),
+            MockMeta::create("slow"),
+            MockMeta::create("fast"),
+            MockMeta::create("medium"),
         ];
 
         let ordered = lb.select_ordered(&backends);
         assert_eq!(ordered.len(), 3);
-        assert_eq!(ordered[0].name(), "fast");
-        assert_eq!(ordered[1].name(), "medium");
-        assert_eq!(ordered[2].name(), "slow");
-    }
-
-    #[test]
-    fn test_ema_load_balancer_healthy_before_unhealthy() {
-        let lb = EmaLoadBalancer;
-        let backends = vec![
-            MockBackend::create("unhealthy_fast", false, 10),
-            MockBackend::create("healthy_slow", true, 500),
-        ];
-
-        let ordered = lb.select_ordered(&backends);
-        assert_eq!(ordered.len(), 2);
-        // Healthy should come first even with higher latency
-        assert_eq!(ordered[0].name(), "healthy_slow");
-        assert_eq!(ordered[1].name(), "unhealthy_fast");
     }
 
     #[test]
     fn test_round_robin_empty() {
         let lb = RoundRobinBalancer::new();
-        let backends: Vec<Arc<dyn Backend>> = vec![];
+        let backends: Vec<Arc<dyn BackendMeta>> = vec![];
 
         assert!(lb.select(&backends).is_none());
     }
@@ -201,9 +144,9 @@ mod tests {
     fn test_round_robin_rotates() {
         let lb = RoundRobinBalancer::new();
         let backends = vec![
-            MockBackend::create("b1", true, 100),
-            MockBackend::create("b2", true, 100),
-            MockBackend::create("b3", true, 100),
+            MockMeta::create("b1"),
+            MockMeta::create("b2"),
+            MockMeta::create("b3"),
         ];
 
         let s1 = lb.select(&backends).unwrap();
@@ -216,26 +159,5 @@ mod tests {
         assert_eq!(s2.name(), "b2");
         assert_eq!(s3.name(), "b3");
         assert_eq!(s4.name(), "b1"); // Wraps around
-    }
-
-    #[test]
-    fn test_round_robin_skips_unhealthy() {
-        let lb = RoundRobinBalancer::new();
-        let backends = vec![
-            MockBackend::create("healthy1", true, 100),
-            MockBackend::create("unhealthy", false, 100),
-            MockBackend::create("healthy2", true, 100),
-        ];
-
-        // Only healthy backends should be selected
-        let s1 = lb.select(&backends).unwrap();
-        let s2 = lb.select(&backends).unwrap();
-        let s3 = lb.select(&backends).unwrap();
-
-        // Should only cycle between healthy1 and healthy2
-        assert!(s1.name() == "healthy1" || s1.name() == "healthy2");
-        assert!(s2.name() == "healthy1" || s2.name() == "healthy2");
-        assert_ne!(s1.name(), s2.name());
-        assert_eq!(s1.name(), s3.name()); // Should wrap around
     }
 }

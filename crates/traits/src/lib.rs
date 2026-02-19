@@ -4,7 +4,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
 mod backend;
-pub use backend::{Backend, ConsensusTracker, HealthStatus, HealthTracker};
+pub use backend::{BackendMeta, ConsensusTracker, HealthStatus, HealthTracker};
 
 mod cache;
 pub use cache::{Cache, CacheError};

@@ -13,16 +13,11 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-# internal
-roxy-types.workspace = true
-
 # alloy
-alloy-json-rpc.workspace = true
 alloy-primitives.workspace = true
 
 # async
 tokio.workspace = true
-async-trait = "0.1"
 
 # misc
 bytes.workspace = true
